@@ -19,7 +19,7 @@ jobs:
           : > /tmp/env.txt
 
       - name: "Import secrets with plugin"
-        uses: cyberark/conjur-action@v2.0.5
+        uses: cyberark/conjur-action@v2.1.0
         with:
           url: ${{ vars.SM_URL }}
           account: ${{ vars.SM_ACCOUNT }}
