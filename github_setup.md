@@ -9,6 +9,8 @@ There are two setup patterns in this repo:
 - Site-level configuration stored as repository variables and secrets.
 - Demo-specific overrides stored in GitHub Environments only when a demo needs values that differ from the site-level defaults.
 
+To initialize missing values with the GitHub CLI, use [`scripts/init-gh-vars-secrets.sh`](./scripts/init-gh-vars-secrets.sh). The script is idempotent and does not overwrite existing repository or environment values.
+
 ## GitHub Environments To Create
 
 Create these GitHub Environments only if you need demo-specific overrides:

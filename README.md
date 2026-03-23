@@ -37,6 +37,57 @@ The Terraform-backed demo also uses:
 GitHub setup reference:
 
 - [`github_setup.md`](./github_setup.md)
+- [`scripts/README.md`](./scripts/README.md)
+
+## GitHub CLI Setup
+
+Create all GitHub environments used by this repo:
+
+```bash
+gh api --method PUT repos/OWNER/REPO/environments/dev
+gh api --method PUT repos/OWNER/REPO/environments/staging
+gh api --method PUT repos/OWNER/REPO/environments/main
+gh api --method PUT repos/OWNER/REPO/environments/terraform
+```
+
+Initialize repository variables, repository secrets, and all supported environments with the helper script:
+
+```bash
+SM_URL='https://example.secretsmgr.example' \
+SM_ACCOUNT='my-account' \
+SM_JWT_AUTHN_ID='github' \
+SM_SECRET_ID_1='path/to/secret-1' \
+SM_SECRET_ID_2='path/to/secret-2' \
+SM_USERNAME='host/my-app' \
+SM_API_KEY='super-secret' \
+DEV__SM_URL='https://dev.example.secretsmgr.example' \
+DEV__SM_ACCOUNT='my-account' \
+DEV__SM_JWT_AUTHN_ID='github-dev' \
+DEV__SM_SECRET_ID_1='path/to/dev-secret-1' \
+DEV__SM_SECRET_ID_2='path/to/dev-secret-2' \
+STAGING__SM_URL='https://staging.example.secretsmgr.example' \
+STAGING__SM_ACCOUNT='my-account' \
+STAGING__SM_JWT_AUTHN_ID='github-staging' \
+STAGING__SM_SECRET_ID_1='path/to/staging-secret-1' \
+STAGING__SM_SECRET_ID_2='path/to/staging-secret-2' \
+MAIN__SM_URL='https://prod.example.secretsmgr.example' \
+MAIN__SM_ACCOUNT='my-account' \
+MAIN__SM_JWT_AUTHN_ID='github-main' \
+MAIN__SM_SECRET_ID_1='path/to/prod-secret-1' \
+MAIN__SM_SECRET_ID_2='path/to/prod-secret-2' \
+TERRAFORM__SM_URL='https://terraform.example.secretsmgr.example' \
+TERRAFORM__SM_ACCOUNT='my-account' \
+TERRAFORM__SM_JWT_AUTHN_ID='github-terraform' \
+TERRAFORM__SM_SECRET_ID_1='path/to/bootstrap-secret' \
+TERRAFORM__SM_SECRET_ID_2='path/to/api-key-secret' \
+TERRAFORM__TFVAR_APPLIANCE_URL='https://conjur.example' \
+TERRAFORM__TFVAR_ACCOUNT='my-account' \
+TERRAFORM__TFVAR_LOGIN='host/terraform' \
+TERRAFORM__TFVAR_SSL_CERT='-----BEGIN CERTIFICATE-----...' \
+TERRAFORM__TFVAR_sm_secret_id_1='path/to/aws-creds' \
+TERRAFORM__TFVAR_API_KEY='bootstrap-api-key' \
+bash scripts/init-gh-vars-secrets.sh --env dev --env staging --env main --env terraform --non-interactive
+```
 
 ## Usage
 
