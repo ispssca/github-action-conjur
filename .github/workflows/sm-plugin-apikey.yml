@@ -1,0 +1,72 @@
+name: sm-apikey-plugin
+
+# Controls when the workflow will run
+on:
+  workflow_dispatch:
+  # Triggers the workflow on push events but only for the "main" branch
+  # push:
+  #   branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: "Prepare demo artifact"
+        run: |
+          : > /tmp/env.txt
+
+      - name: "Import secrets with plugin"
+        uses: cyberark/conjur-action@v2.0.5
+        with:
+          url: ${{ vars.SM_URL }}
+          account: ${{ vars.SM_ACCOUNT }}
+          host_id: ${{ secrets.SM_USERNAME }}
+          api_key: ${{ secrets.SM_API_KEY }}
+          secrets: ${{ vars.SM_SECRET_ID_1 }}|SSH_USERNAME;${{ vars.SM_SECRET_ID_2 }}|SSH_PASSWORD
+
+      - name: "Show imported environment variable names"
+        run: |
+          echo "masked: vars.SM_URL: ${{ vars.SM_URL }}"
+          echo "masked: env.SSH_USERNAME : ${{ env.SSH_USERNAME }}"
+          echo "masked: env.SSH_PASSWORD: ${{ env.SSH_PASSWORD }}"
+
+      - name: "Write demo artifact"
+        if: always()
+        run: |
+          {
+            echo "flow: host-id + api-key -> cyberark/conjur-action -> env vars"
+            echo "vars.SM_URL: ${{ vars.SM_URL }}"
+            echo "vars.SM_ACCOUNT: ${{ vars.SM_ACCOUNT }}"
+            echo "host identity source: secrets.SM_USERNAME"
+            echo "requested variables: ${{ vars.SM_SECRET_ID_1 }}, ${{ vars.SM_SECRET_ID_2 }}"
+            echo "env vars produced: SSH_USERNAME, SSH_PASSWORD"
+            echo ""
+            echo "masked values follow from the runner environment:"
+            echo "env.SSH_USERNAME: $SSH_USERNAME"
+            echo "env.SSH_PASSWORD: $SSH_PASSWORD"
+          } >> /tmp/env.txt
+
+      - name: "Write job summary"
+        if: always()
+        run: |
+          {
+            echo "## Demo Summary"
+            echo ""
+            echo "- Auth source: host ID and API key"
+            echo "- Secrets Manager path: plugin-based fetch via \`cyberark/conjur-action\`"
+            echo "- Requested variables: \`${{ vars.SM_SECRET_ID_1 }}\`, \`${{ vars.SM_SECRET_ID_2 }}\`"
+            echo "- Environment variables created: \`SSH_USERNAME\`, \`SSH_PASSWORD\`"
+            echo "- Artifact: \`env.txt\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Upload demo artifact"
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: env.txt
+          path: /tmp/env.txt
+          retention-days: 90
+          archive: false

@@ -1,0 +1,86 @@
+name: trufflehog-single-scan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trufflehog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: TruffleHog-Simple-Scan
+        id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+
+          REPO_URL="https://github.com/trufflesecurity/test_keys"
+
+          set +e
+          docker run --rm trufflesecurity/trufflehog:latest \
+            git "$REPO_URL" \
+            --json \
+            --only-verified \
+            > reports/trufflehog-report.json
+          rc=$?
+          set -e
+
+          echo "trufflehog_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload JSON report
+        uses: actions/upload-artifact@v7
+        with:
+          name: trufflehog-report
+          path: reports/trufflehog-report.json
+          archive: false
+
+      - name: Job Summary (basic jq)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPORT="reports/trufflehog-report.json"
+          REPO_URL='${{ steps.scan.outputs.repo_url }}'
+          RC='${{ steps.scan.outputs.trufflehog_rc }}'
+
+          {
+            echo "## TruffleHog Scan Summary"
+            echo
+            echo "**Target:** \`$REPO_URL\`"
+            echo "**Exit code:** \`$RC\` (job intentionally not failed)"
+            echo "**What success means:** the report is created and the summary explains whether findings were detected."
+            echo
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! -s "$REPORT" ]]; then
+            echo "No report produced." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          total="$(jq -s 'length' "$REPORT")"
+          echo "**Findings (events):** \`$total\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "### First 25 events (raw-ish fields)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Basic jq: just print a few top-level + git metadata fields
+          # (TruffleHog emits one JSON object per line; -s turns it into an array)
+          jq -s '
+            .[:25]
+            | map({
+                detector: (.DetectorName // "unknown"),
+                verified: (.Verified // false),
+                file: (.SourceMetadata.Data.Git.file // "unknown"),
+                line: (.SourceMetadata.Data.Git.line // null),
+                commit: (.SourceMetadata.Data.Git.commit // null)
+              })
+          ' "$REPORT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Full JSON report available as artifact: **trufflehog-report**." | tee -a "$GITHUB_STEP_SUMMARY"
