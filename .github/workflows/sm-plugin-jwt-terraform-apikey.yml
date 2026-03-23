@@ -1,0 +1,173 @@
+# Demo flow:
+# 1. Request a GitHub OIDC JWT.
+# 2. Exchange that JWT for a Secrets Manager session token.
+# 3. Fetch secrets from Secrets Manager.
+# 4. Inject one fetched value into Terraform as TF_VAR_api_key.
+# 5. Run terraform init/apply to show provider usage.
+
+name: "sm-plugin-jwt-terraform-apikey"
+
+on:
+  workflow_dispatch:
+#  push:
+#    branches: [ "main" ]
+#  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VAR_appliance_url: "${{ vars.TFVAR_APPLIANCE_URL }}"
+  TF_VAR_account: "${{ vars.TFVAR_ACCOUNT }}"
+  TF_VAR_login: "${{ vars.TFVAR_LOGIN }}"
+  TF_VAR_api_key: "${{ secrets.TFVAR_API_KEY }}"
+  TF_VAR_ssl_cert: "${{ vars.TFVAR_SSL_CERT }}"
+  TF_VAR_conjur_secret_id_1: "${{ vars.TFVAR_sm_secret_id_1 }}"
+  CONJUR_AUTHENTICATE_URL: "${{ vars.SM_URL }}/authn-jwt/${{ vars.SM_JWT_AUTHN_ID }}/${{ vars.SM_ACCOUNT }}/authenticate"
+  CONJUR_RETRIEVE_URL: "${{ vars.SM_URL }}/secrets/${{ vars.SM_ACCOUNT }}/variable"
+
+jobs:
+  terraform:
+    name: "Terraform"
+    runs-on: ubuntu-latest
+    environment: terraform
+
+    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: "Prepare demo artifact"
+        run: |
+          : > /tmp/output.txt
+
+      - name: "Get OIDC request metadata"
+        uses: actions/github-script@v6
+        id: script
+        timeout-minutes: 1
+        with:
+          debug: true
+          script: |
+            const token = process.env['ACTIONS_RUNTIME_TOKEN']
+            const runtimeUrl = process.env['ACTIONS_ID_TOKEN_REQUEST_URL']
+            core.setOutput('TOKEN', token.trim())
+            core.setOutput('IDTOKENURL', runtimeUrl.trim())
+
+      - name: "Request GitHub OIDC JWT"
+        run: |
+          export JWT=$(curl -H "Authorization: bearer  ${{steps.script.outputs.TOKEN}}" ${{steps.script.outputs.IDTOKENURL}}  -H "Accept: application/json; api-version=2.0" -H "Content-Type: application/json" -d "{}" | jq -r '.value')
+          echo "JWT=$JWT" >> "$GITHUB_ENV"
+          printf '%s\n' "$JWT" > /tmp/action.jwt
+
+      - name: "Upload JWT Artifact"
+        uses: actions/upload-artifact@v7
+        with:
+          name: actions.jwt
+          path: /tmp/action.jwt
+          retention-days: 90
+          archive: false
+
+      - name: "Show configured inputs"
+        run: |
+          echo "vars.SM_URL: ${{ vars.SM_URL }}"
+          echo "vars.SM_ACCOUNT: ${{ vars.SM_ACCOUNT }}"
+          echo "vars.SM_JWT_AUTHN_ID: ${{ vars.SM_JWT_AUTHN_ID }}"
+          echo "vars.SM_SECRET_ID_1: ${{ vars.SM_SECRET_ID_1 }}"
+          echo "vars.SM_SECRET_ID_2: ${{ vars.SM_SECRET_ID_2 }}"
+
+      - name: "Authenticate to Secrets Manager"
+        run: |
+          echo "Authenticating with JWT to Conjur"
+          echo ""
+          export SESSION_TOKEN=$(curl -k -X POST $CONJUR_AUTHENTICATE_URL -H "Content-Type:application/x-www-form-urlencoded" -H "Accept-Encoding:base64" --data-urlencode "jwt=$JWT")
+          echo "SESSION_TOKEN=$SESSION_TOKEN" >> "$GITHUB_ENV"
+
+      - name: "Fetch provider bootstrap secret"
+        run: |
+          export SECRET_1=$(curl -k -H "Authorization:Token token=\"${SESSION_TOKEN}\"" $CONJUR_RETRIEVE_URL/${{ vars.SM_SECRET_ID_1 }})
+          echo "SECRET_1=$SECRET_1" >> "$GITHUB_ENV"
+
+      - name: "Fetch Terraform API key secret"
+        run: |
+          export SECRET_2=$(curl -k -H "Authorization:Token token=\"${SESSION_TOKEN}\"" $CONJUR_RETRIEVE_URL/${{ vars.SM_SECRET_ID_2 }})
+          echo "SECRET_2=$SECRET_2" >> "$GITHUB_ENV"
+          echo "TF_VAR_api_key=$SECRET_2" >> "$GITHUB_ENV"
+
+      - name: "Write demo artifact"
+        run: |
+          {
+            echo "flow: github-oidc -> secrets-manager-authenticate -> fetch secrets -> terraform"
+            echo "vars.SM_URL: ${{ vars.SM_URL }}"
+            echo "vars.SM_ACCOUNT: ${{ vars.SM_ACCOUNT }}"
+            echo "vars.SM_JWT_AUTHN_ID: ${{ vars.SM_JWT_AUTHN_ID }}"
+            echo "vars.SM_SECRET_ID_1: ${{ vars.SM_SECRET_ID_1 }}"
+            echo "vars.SM_SECRET_ID_2: ${{ vars.SM_SECRET_ID_2 }}"
+            echo "terraform variables set: TF_VAR_appliance_url, TF_VAR_account, TF_VAR_login, TF_VAR_api_key, TF_VAR_ssl_cert, TF_VAR_conjur_secret_id_1"
+            echo ""
+            echo "masked values follow from the runner environment:"
+            echo "SECRET_1: $SECRET_1"
+            echo "SECRET_2: $SECRET_2"
+          } >> /tmp/output.txt
+
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.10.0
+
+      # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+      - name: Terraform Init
+        run: terraform init
+
+      #    # Checks that all Terraform configuration files adhere to a canonical format
+      #    - name: Terraform Format
+      #      run: terraform fmt -check
+
+      #    # Generates an execution plan for Terraform
+      #    - name: Terraform Plan
+      #      run: terraform plan -input=false
+
+      # On push to "main", build or change infrastructure according to Terraform configuration files
+      # Note: It is recommended to set up a required "strict" status check in your repository for "Terraform Cloud". See the documentation on "strict" required status checks for more information: https://help.github.com/en/github/administering-a-repository/types-of-required-status-checks
+      #    - name: Terraform Apply
+      #      if: github.ref == 'refs/heads/"main"' && github.event_name == 'push'
+      #      run: terraform apply -auto-approve -input=false
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false
+
+      - name: "TF Output"
+        run: |
+          terraform output secret_1_output
+          terraform output aws_key
+          terraform output aws_secret
+
+      - name: "Write job summary"
+        if: always()
+        run: |
+          {
+            echo "## Demo Summary"
+            echo ""
+            echo "- Auth source: GitHub OIDC JWT"
+            echo "- Secrets Manager path: direct REST API before Terraform"
+            echo "- Requested variables: \`${{ vars.SM_SECRET_ID_1 }}\`, \`${{ vars.SM_SECRET_ID_2 }}\`"
+            echo "- Terraform bridge: fetched secret -> \`TF_VAR_api_key\`"
+            echo "- Terraform steps: \`init\`, \`apply\`, \`output\`"
+            echo "- Artifacts: \`actions.jwt\`, \`output.txt\`"
+            echo "- Job status: \`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Upload demo artifact"
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: output.txt
+          path: /tmp/output.txt
+          retention-days: 90
+          archive: false

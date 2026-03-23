@@ -1,0 +1,189 @@
+name: trufflehog-multi-scan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trufflehog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: TruffleHog-Scans
+        id: scan
+        shell: bash
+        env:
+          # GitHub Variable: newline-separated list of public repo URLs
+          REPO_LIST: ${{ vars.TRUFFLEHOG_REPOS }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+
+          if [[ -z "${REPO_LIST//[[:space:]]/}" ]]; then
+            echo "ERROR: vars.TRUFFLEHOG_REPOS is empty. Define it as newline-separated public repo URLs." >&2
+            echo "repos_scanned=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Normalize list: drop empty lines + comments
+          mapfile -t repos < <(printf '%s\n' "$REPO_LIST" \
+            | sed -e 's/\r$//' \
+            | sed -e 's/[[:space:]]*$//' \
+            | awk 'NF && $0 !~ /^[[:space:]]*#/' )
+
+          if [[ ${#repos[@]} -eq 0 ]]; then
+            echo "No valid repos found in vars.TRUFFLEHOG_REPOS (after filtering comments/blank lines)." >&2
+            echo "repos_scanned=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # index for downstream summary
+          echo "[]" > reports/index.json
+
+          url_to_slug() {
+            local u="$1"
+            u="${u%.git}"
+            local owner repo
+            owner="$(echo "$u" | awk -F/ '{print $(NF-1)}')"
+            repo="$(echo "$u" | awk -F/ '{print $NF}')"
+            echo "${owner}__${repo}"
+          }
+
+          # prefer tokenless public rate limits; no auth required
+          overall_fail=0
+
+          for REPO_URL in "${repos[@]}"; do
+            slug="$(url_to_slug "$REPO_URL")"
+            outdir="reports/$slug"
+            mkdir -p "$outdir"
+
+            echo "=== Scanning: $REPO_URL -> $outdir/trufflehog.ndjson"
+
+            # Always create a file so downstream jq/glob logic is stable
+            : > "$outdir/trufflehog.ndjson"
+
+            # Do not fail the workflow; capture rc and continue
+            set +e
+            docker run --rm \
+              -v "$PWD/$outdir:/out" \
+              trufflesecurity/trufflehog:latest \
+              git "$REPO_URL" \
+              --json \
+              --no-update \
+              > "$outdir/trufflehog.ndjson"
+            rc=$?
+            set -e
+
+            # Normalize common "no diff / nothing to scan" non-actionable failures to rc=0
+            # (TruffleHog sometimes returns non-zero for operational conditions.)
+            if [[ $rc -ne 0 ]]; then
+              if grep -qiE 'BASE and HEAD commits are the same|won.t scan anything|nothing to scan|no commits' "$outdir/trufflehog.ndjson" 2>/dev/null; then
+                rc=0
+              fi
+            fi
+
+            # Count events: each line is a JSON object
+            if [[ -s "$outdir/trufflehog.ndjson" ]]; then
+              count="$(jq -s 'length' "$outdir/trufflehog.ndjson" 2>/dev/null || echo 0)"
+            else
+              count=0
+            fi
+
+            tmp="$(mktemp)"
+            jq --arg url "$REPO_URL" --arg slug "$slug" --argjson rc "$rc" --argjson count "$count" \
+              '. + [{url:$url, slug:$slug, rc:$rc, event_count:$count}]' \
+              reports/index.json > "$tmp" && mv "$tmp" reports/index.json
+
+            if [[ $rc -ne 0 ]]; then
+              overall_fail=1
+            fi
+          done
+
+          echo "repos_scanned=${#repos[@]}" >> "$GITHUB_OUTPUT"
+          echo "overall_nonzero_rc=$overall_fail" >> "$GITHUB_OUTPUT"
+
+      - name: Upload all JSON reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: trufflehog-reports
+          path: reports
+          archive: false
+
+      - name: Job Summary + Log Output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INDEX="reports/index.json"
+
+          echo "## TruffleHog Scan Summary" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "**What success means:** each requested repository gets a report directory and the summary shows whether a non-zero scan result was operational or finding-related.**" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! -s "$INDEX" ]]; then
+            echo "No index produced (vars.TRUFFLEHOG_REPOS likely empty)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          repos_scanned="$(jq 'length' "$INDEX")"
+          echo "**Repos scanned:** \`$repos_scanned\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "### Per-repo results" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "| Repo | Exit code | Findings (events) | Report |" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "|---|---:|---:|---|" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          jq -r '
+            .[]
+            | "| \(.url) | \(.rc) | \(.event_count) | reports/\(.slug)/trufflehog.ndjson |"
+          ' "$INDEX" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "### Top findings across all repos (first 25 events)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "| Repo | Detector | File | Line | Commit |" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---:|---|" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Flatten ndjson across repos; take first 25 events.
+          # Note: report schema varies by detector; use best-effort fields.
+          jq -sr '
+            flatten
+            | .[0:25]
+            | map({
+                detector: (.DetectorName // .Detector // .DetectorType // "unknown"),
+                file: (.SourceMetadata.Data.Git.file // "unknown"),
+                line: (.SourceMetadata.Data.Git.line // 0),
+                commit: (.SourceMetadata.Data.Git.commit // ""),
+                repo: (
+                  .SourceMetadata.Data.Git.repository //
+                  .SourceMetadata.Data.Git.remote //
+                  .SourceMetadata.Data.Git.url //
+                  ""
+                )
+              })
+            | .[]
+            | "| \(.repo) | \(.detector) | \(.file) | \(.line) | \(.commit) |"
+          ' reports/*/trufflehog.ndjson 2>/dev/null \
+            | sed -e 's/|  |/| (unknown) |/g' \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### Detector breakdown (all repos)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          jq -sr '
+            flatten
+            | group_by(.DetectorName // .Detector // .DetectorType // "unknown")
+            | map({detector: (.[0].DetectorName // .[0].Detector // .[0].DetectorType // "unknown"), count: length})
+            | sort_by(-.count)
+            | .[]
+            | "- **\(.detector)**: \(.count)"
+          ' reports/*/trufflehog.ndjson 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || echo "- (no findings)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "All raw JSON reports (plus index.json) are available as the workflow artifact: **trufflehog-reports**." | tee -a "$GITHUB_STEP_SUMMARY"
