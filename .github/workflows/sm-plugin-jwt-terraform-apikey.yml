@@ -44,7 +44,7 @@ jobs:
           : > /tmp/output.txt
 
       - name: "Get OIDC request metadata"
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         id: script
         timeout-minutes: 1
         with:
